@@ -53,11 +53,13 @@ func (b *MatrixBot) isProcessed(id id.EventID) bool {
 }
 
 type MatrixMessage struct {
-	Sender  string
-	Body    string
-	File    *os.File
-	Type    event.MessageType
-	EventID id.EventID
+	Sender      string
+	Body        string
+	File        *os.File
+	Type        event.MessageType
+	EventID     id.EventID
+	IsEdit      bool
+	EditEventID id.EventID
 }
 
 type MatrixReaction struct {
@@ -226,7 +228,8 @@ func (b *MatrixBot) Start(msgChan chan<- MatrixMessage, reactChan chan<- MatrixR
 			return
 		}
 		content := ev.Content.AsReaction()
-		if content.RelatesTo.Type == event.RelAnnotation {
+		// In ReactionEventContent, RelatesTo is a struct, not a pointer.
+		if content != nil && content.RelatesTo.EventID != "" && content.RelatesTo.Type == event.RelAnnotation {
 			reactChan <- MatrixReaction{
 				Sender:    string(ev.Sender),
 				Emoji:     content.RelatesTo.Key,
@@ -249,8 +252,24 @@ func (b *MatrixBot) Start(msgChan chan<- MatrixMessage, reactChan chan<- MatrixR
 		}
 
 		content := ev.Content.AsMessage()
-		body := strings.TrimSpace(content.Body)
+		if content == nil {
+			return
+		}
 
+		body := strings.TrimSpace(content.Body)
+		isEdit := false
+		var editID id.EventID
+
+		// Handle Edits (RelatesTo in MessageEventContent is a pointer)
+		if content.RelatesTo != nil && content.RelatesTo.Type == event.RelReplace && content.RelatesTo.EventID != "" {
+			isEdit = true
+			editID = content.RelatesTo.EventID
+			if content.NewContent != nil {
+				body = strings.TrimSpace(content.NewContent.Body)
+			}
+		}
+
+		// Check for Admin Commands
 		if isAdminMatrix(ev.Sender, b.adminUsers) {
 			if ev.RoomID != b.bridgedRoom || strings.HasPrefix(body, "/") {
 				b.handleCommand(ctx, ev.RoomID, body, onJoin)
@@ -261,7 +280,14 @@ func (b *MatrixBot) Start(msgChan chan<- MatrixMessage, reactChan chan<- MatrixR
 		if ev.RoomID == b.bridgedRoom {
 			switch content.MsgType {
 			case event.MsgText, event.MsgEmote:
-				msgChan <- MatrixMessage{Sender: string(ev.Sender), Body: body, Type: content.MsgType, EventID: ev.ID}
+				msgChan <- MatrixMessage{
+					Sender:      string(ev.Sender),
+					Body:        body,
+					Type:        content.MsgType,
+					EventID:     ev.ID,
+					IsEdit:      isEdit,
+					EditEventID: editID,
+				}
 			
 			case event.MsgImage, event.MsgVideo, event.MsgFile, event.MsgAudio:
 				file, err := b.downloadMedia(ctx, content)
@@ -270,11 +296,13 @@ func (b *MatrixBot) Start(msgChan chan<- MatrixMessage, reactChan chan<- MatrixR
 					return
 				}
 				msgChan <- MatrixMessage{
-					Sender:  string(ev.Sender),
-					Body:    body,
-					File:    file,
-					Type:    content.MsgType,
-					EventID: ev.ID,
+					Sender:      string(ev.Sender),
+					Body:        body,
+					File:        file,
+					Type:        content.MsgType,
+					EventID:     ev.ID,
+					IsEdit:      isEdit,
+					EditEventID: editID,
 				}
 			}
 		}
@@ -470,6 +498,30 @@ func (b *MatrixBot) React(eventID id.EventID, emoji string) id.EventID {
 	}
 	resp, err := b.client.SendMessageEvent(context.Background(), b.bridgedRoom, event.EventReaction, content)
 	if err != nil {
+		return ""
+	}
+	return resp.EventID
+}
+
+func (b *MatrixBot) EditMessage(originalEventID id.EventID, text string) id.EventID {
+	if b.bridgedRoom == "" || originalEventID == "" {
+		return ""
+	}
+	content := &event.MessageEventContent{
+		MsgType: event.MsgText,
+		Body:    "* " + text,
+		RelatesTo: &event.RelatesTo{
+			Type:    event.RelReplace,
+			EventID: originalEventID,
+		},
+		NewContent: &event.MessageEventContent{
+			MsgType: event.MsgText,
+			Body:    text,
+		},
+	}
+	resp, err := b.client.SendMessageEvent(context.Background(), b.bridgedRoom, event.EventMessage, content)
+	if err != nil {
+		log.Printf("Matrix: Error editing message %s: %v", originalEventID, err)
 		return ""
 	}
 	return resp.EventID

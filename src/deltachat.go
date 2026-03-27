@@ -30,6 +30,8 @@ type DeltaChatMessage struct {
 	Body       string
 	File       *os.File
 	MsgID      uint32
+	IsEdit     bool
+	EditMsgID  uint32
 }
 
 type DeltaChatReaction struct {
@@ -145,7 +147,7 @@ func NewDeltaChatBot(dbPath, adminList, botName string) (*DeltaChatBot, error) {
 		log.Printf("DeltaChat: Using existing account %d (%s)", accId, email)
 
 		// Re-enforce stable ports even for existing accounts
-		mailServer := "ssl://chat.adminforge.de"
+		mailServer := "chat.adminforge.de"
 		mailPort := "993"
 		smtpPort := "465"
 		secVal := "2" // SSL/TLS (Implicit)
@@ -226,11 +228,17 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 			return
 		}
 
-		if msg.State >= 200 || msg.IsInfo {
+		isEdit := msg.IsEdited && msg.OriginalMsgId != nil
+		var editMsgID uint32
+		if isEdit {
+			editMsgID = *msg.OriginalMsgId
+		}
+
+		if msg.State >= 200 || (msg.IsInfo && !isEdit) {
 			return
 		}
 
-		if msg.ViewType == deltachat.ViewtypeUnknown {
+		if msg.ViewType == deltachat.ViewtypeUnknown && !isEdit {
 			return
 		}
 
@@ -254,7 +262,7 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 		}
 
 		// COMMAND HANDLING
-		if isFromAdmin {
+		if isFromAdmin && !isEdit {
 			if chatInfo.ChatType == deltachat.ChatTypeSingle || strings.HasPrefix(msg.Text, "/") {
 				b.handleCommand(msg.ChatId, msg.Text, onJoin)
 				return
@@ -263,7 +271,7 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 
 		// RELAYING
 		if msg.ChatId == b.chatId {
-			if msg.File != nil {
+			if msg.File != nil && !isEdit {
 				tmpFile, err := os.CreateTemp("", "dc-bridge-*")
 				if err == nil {
 					ext := sanitizeExtDC(filepath.Ext(*msg.File))
@@ -278,6 +286,8 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 							Body:       msg.Text,
 							File:       finalFile,
 							MsgID:      msgId,
+							IsEdit:     isEdit,
+							EditMsgID:  editMsgID,
 						}
 						return
 					}
@@ -285,11 +295,13 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 				}
 			}
 
-			if msg.Text != "" {
+			if msg.Text != "" || isEdit {
 				msgChan <- DeltaChatMessage{
 					SenderName: senderName,
 					Body:       msg.Text,
 					MsgID:      msgId,
+					IsEdit:     isEdit,
+					EditMsgID:  editMsgID,
 				}
 			}
 		}
@@ -393,6 +405,16 @@ func (b *DeltaChatBot) handleCommand(chatId uint32, body string, onJoin func(uin
 
 func (b *DeltaChatBot) SetBridgedChat(chatId uint32) {
 	b.chatId = chatId
+}
+
+func (b *DeltaChatBot) EditMessage(msgId uint32, text string) {
+	if b.chatId == 0 || msgId == 0 {
+		return
+	}
+	err := b.rpc.SendEditRequest(b.accId, msgId, text)
+	if err != nil {
+		log.Printf("DeltaChat: Error editing message %d: %v", msgId, err)
+	}
 }
 
 func (b *DeltaChatBot) SendMessage(text string) uint32 {

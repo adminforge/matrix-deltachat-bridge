@@ -226,6 +226,15 @@ func main() {
 			
 			cleanUser := stripMatrixUser(msg.Sender)
 			formatted := fmt.Sprintf("[matrix] %s: %s", cleanUser, msg.Body)
+
+			if msg.IsEdit {
+				dcID := getDCID(msg.EditEventID)
+				if dcID != 0 {
+					dBot.EditMessage(dcID, formatted+" (bearbeitet)")
+				}
+				continue
+			}
+
 			var dcID uint32
 			if msg.File != nil {
 				dcID = dBot.SendMedia(formatted, msg.File.Name())
@@ -255,6 +264,15 @@ func main() {
 		for msg := range dcToMatrixChan {
 			// Use MsgID for reliable deduplication from Delta Chat
 			if isDuplicate(fmt.Sprintf("dc_%d", msg.MsgID)) {
+				continue
+			}
+
+			if msg.IsEdit {
+				mEventID := getMatrixID(msg.EditMsgID)
+				if mEventID != "" {
+					formatted := fmt.Sprintf("[deltachat] %s: %s", msg.SenderName, msg.Body)
+					mBot.EditMessage(mEventID, formatted+" (bearbeitet)")
+				}
 				continue
 			}
 
