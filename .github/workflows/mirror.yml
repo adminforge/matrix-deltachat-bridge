@@ -1,4 +1,3 @@
-# Datei: .github/workflows/mirror.yml
 name: Mirror adminForge matrix-deltachat-bridge
 
 on:
@@ -9,6 +8,9 @@ on:
 jobs:
   mirror:
     runs-on: ubuntu-latest
+    # Schreibrechte explizit vergeben
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout GitHub Repo
@@ -17,16 +19,18 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: Mirror-Inhalt kopieren (ohne .github/)
+      - name: Mirror-Inhalt kopieren
         run: |
-          # Mirror.yml sichern
+          # Mirror.yml im Speicher sichern
           cp .github/workflows/mirror.yml /tmp/mirror.yml
           
-          # AdminForge Repo klonen
-          git clone https://oauth2:${{ secrets.TOKEN }}@git.adminforge.de/adminforge/matrix-deltachat-bridge.git /tmp/source
+          # AdminForge Repo klonen (Source)
+          # Nutze --depth 1 für schnelleren Klon, da wir nur den aktuellen Stand brauchen
+          git clone --depth 1 https://oauth2:${{ secrets.TOKEN }}@git.adminforge.de/adminforge/matrix-deltachat-bridge.git /tmp/source
           
-          # Alles außer .github/ kopieren
-          rsync -av --exclude='.git' --exclude='.github/' /tmp/source/ ./
+          # Alles außer .git/ und .github/ synchronisieren
+          # --delete sorgt dafür, dass im Ziel gelöschte Dateien auch hier verschwinden
+          rsync -av --delete --exclude='.git/' --exclude='.github/' /tmp/source/ ./
           
           # Mirror.yml wiederherstellen
           mkdir -p .github/workflows/
@@ -37,10 +41,14 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           
-          if git diff --quiet; then
-            echo "Keine Änderungen"
+          # Zuerst alle Änderungen (auch neue Dateien) zum Index hinzufügen
+          git add -A
+          
+          # Prüfen, ob es im Index (staged) Unterschiede zum letzten Commit gibt
+          if git diff --staged --quiet; then
+            echo "Keine Änderungen zum Mergen vorhanden."
           else
-            git add .
-            git commit -m "Mirror from adminForge matrix-deltachat-bridge ($(date))"
-            git push origin main --force-with-lease
+            git commit -m "Mirror from adminForge matrix-deltachat-bridge ($(date +'%Y-%m-%d %H:%M'))"
+            # Push erzwingen, da wir ein Mirror-Verhalten erzielen wollen
+            git push origin main
           fi
