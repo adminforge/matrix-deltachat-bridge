@@ -1,0 +1,46 @@
+# Datei: .github/workflows/mirror.yml
+name: Mirror adminForge matrix-deltachat-bridge
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # alle 6 Stunden
+  workflow_dispatch:
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout GitHub Repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Mirror-Inhalt kopieren (ohne .github/)
+        run: |
+          # Mirror.yml sichern
+          cp .github/workflows/mirror.yml /tmp/mirror.yml
+          
+          # AdminForge Repo klonen
+          git clone https://oauth2:${{ secrets.TOKEN }}@git.adminforge.de/adminforge/matrix-deltachat-bridge.git /tmp/source
+          
+          # Alles außer .github/ kopieren
+          rsync -av --exclude='.git' --exclude='.github/' /tmp/source/ ./
+          
+          # Mirror.yml wiederherstellen
+          mkdir -p .github/workflows/
+          cp /tmp/mirror.yml .github/workflows/mirror.yml
+
+      - name: Git konfigurieren & pushen
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          
+          if git diff --quiet; then
+            echo "Keine Änderungen"
+          else
+            git add .
+            git commit -m "Mirror from adminForge matrix-deltachat-bridge ($(date))"
+            git push origin main --force-with-lease
+          fi
