@@ -3,7 +3,7 @@ module matrix-deltachat-bridge
 go 1.25.0
 
 require (
-	github.com/chatmail/rpc-client-go/v2 v2.44.0
+	github.com/chatmail/rpc-client-go/v2 v2.44.1-0.20260308121520-109d0884d1fd
 	github.com/joho/godotenv v1.5.1
 	github.com/mattn/go-sqlite3 v1.14.34
 	go.mau.fi/util v0.9.7

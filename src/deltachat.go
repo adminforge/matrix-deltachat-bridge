@@ -25,6 +25,31 @@ type DeltaChatBot struct {
 	inviteUrl  string
 }
 
+// SafeMessage mirrors deltachat.Message but uses json.RawMessage for Quote to avoid library panics.
+type SafeMessage struct {
+	Id            uint32              `json:"id"`
+	ChatId        uint32              `json:"chatId"`
+	FromId        uint32              `json:"fromId"`
+	State         uint32              `json:"state"`
+	IsInfo        bool                `json:"isInfo"`
+	ViewType      deltachat.Viewtype  `json:"viewType"`
+	File          *string             `json:"file"`
+	Text          string              `json:"text"`
+	IsEdited      bool                `json:"isEdited"`
+	OriginalMsgId *uint32             `json:"originalMsgId"`
+	ParentId      *uint32             `json:"parentId"`
+	Quote         json.RawMessage     `json:"quote"`
+}
+
+func (b *DeltaChatBot) safeGetMessage(msgId uint32) (*SafeMessage, error) {
+	var msg SafeMessage
+	err := b.rpc.Transport.CallResult(context.Background(), &msg, "get_message", b.accId, msgId)
+	if err != nil {
+		return nil, err
+	}
+	return &msg, nil
+}
+
 type DeltaChatMessage struct {
 	SenderName string
 	Body       string
@@ -32,6 +57,7 @@ type DeltaChatMessage struct {
 	MsgID      uint32
 	IsEdit     bool
 	EditMsgID  uint32
+	ReplyTo    uint32
 }
 
 type DeltaChatReaction struct {
@@ -219,8 +245,9 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 			return
 		}
 
-		msg, err := bot.Rpc.GetMessage(accId, msgId)
+		msg, err := b.safeGetMessage(msgId)
 		if err != nil {
+			log.Printf("DeltaChat: Error getting message %d: %v", msgId, err)
 			return
 		}
 
@@ -234,6 +261,11 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 			editMsgID = *msg.OriginalMsgId
 		}
 
+		replyTo := uint32(0)
+		if msg.ParentId != nil {
+			replyTo = *msg.ParentId
+		}
+
 		if msg.State >= 200 || (msg.IsInfo && !isEdit) {
 			return
 		}
@@ -244,13 +276,22 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 
 		// Resolve sender address for relaying
 		senderAddr := "Unknown"
-		contact, err := bot.Rpc.GetContact(accId, msg.FromId)
+		if msg.FromId != 0 {
+			contact, err := bot.Rpc.GetContact(accId, msg.FromId)
+			if err == nil {
+				senderAddr = contact.Address
+			}
+		}
+		
 		senderName := "Unknown"
-		if err == nil {
-			senderAddr = contact.Address
-			senderName = contact.DisplayName
-			if senderName == "" {
-				senderName = contact.Address
+		if msg.FromId != 0 {
+			contact, err := bot.Rpc.GetContact(accId, msg.FromId)
+			if err == nil {
+				senderAddr = contact.Address
+				senderName = contact.DisplayName
+				if senderName == "" {
+					senderName = contact.Address
+				}
 			}
 		}
 
@@ -288,6 +329,7 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 							MsgID:      msgId,
 							IsEdit:     isEdit,
 							EditMsgID:  editMsgID,
+							ReplyTo:    replyTo,
 						}
 						return
 					}
@@ -302,6 +344,7 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 					MsgID:      msgId,
 					IsEdit:     isEdit,
 					EditMsgID:  editMsgID,
+					ReplyTo:    replyTo,
 				}
 			}
 		}
@@ -428,11 +471,27 @@ func (b *DeltaChatBot) SendMessage(text string) uint32 {
 	return msgId
 }
 
+func (b *DeltaChatBot) SendMessageWithReply(text string, replyTo uint32) uint32 {
+	if b.chatId == 0 {
+		return 0
+	}
+	data := deltachat.MessageData{
+		Text:            &text,
+		QuotedMessageId: &replyTo,
+	}
+	msgId, err := b.rpc.SendMsg(b.accId, b.chatId, data)
+	if err != nil {
+		log.Printf("DeltaChat: Error sending reply: %v", err)
+		return 0
+	}
+	return msgId
+}
+
 func (b *DeltaChatBot) SendMedia(text string, filePath string) uint32 {
 	if b.chatId == 0 {
 		return 0
 	}
-	
+
 	ext := strings.ToLower(filepath.Ext(filePath))
 	viewType := deltachat.ViewtypeFile
 	switch ext {
@@ -447,11 +506,6 @@ func (b *DeltaChatBot) SendMedia(text string, filePath string) uint32 {
 	}
 
 	filename := filepath.Base(filePath)
-	pair, err := b.rpc.MiscSendMsg(b.accId, b.chatId, &text, &filePath, &filename, nil, nil)
-	if err != nil {
-		return 0
-	}
-	
 	msgId, err := b.rpc.SendMsg(b.accId, b.chatId, deltachat.MessageData{
 		Text:     &text,
 		File:     &filePath,
@@ -459,7 +513,39 @@ func (b *DeltaChatBot) SendMedia(text string, filePath string) uint32 {
 		Viewtype: &viewType,
 	})
 	if err != nil {
-		return pair.First
+		return 0
+	}
+	return msgId
+}
+
+func (b *DeltaChatBot) SendMediaWithReply(text string, filePath string, replyTo uint32) uint32 {
+	if b.chatId == 0 {
+		return 0
+	}
+
+	ext := strings.ToLower(filepath.Ext(filePath))
+	viewType := deltachat.ViewtypeFile
+	switch ext {
+	case ".jpg", ".jpeg", ".png":
+		viewType = deltachat.ViewtypeImage
+	case ".gif":
+		viewType = deltachat.ViewtypeGif
+	case ".mp4", ".mov", ".avi":
+		viewType = deltachat.ViewtypeVideo
+	case ".mp3", ".ogg", ".wav":
+		viewType = deltachat.ViewtypeAudio
+	}
+
+	filename := filepath.Base(filePath)
+	msgId, err := b.rpc.SendMsg(b.accId, b.chatId, deltachat.MessageData{
+		Text:            &text,
+		File:            &filePath,
+		Filename:        &filename,
+		Viewtype:        &viewType,
+		QuotedMessageId: &replyTo,
+	})
+	if err != nil {
+		return 0
 	}
 	return msgId
 }

@@ -236,12 +236,25 @@ func main() {
 			}
 
 			var dcID uint32
+			replyToDC := uint32(0)
+			if msg.ReplyTo != "" {
+				replyToDC = getDCID(msg.ReplyTo)
+			}
+
 			if msg.File != nil {
-				dcID = dBot.SendMedia(formatted, msg.File.Name())
+				if replyToDC != 0 {
+					dcID = dBot.SendMediaWithReply(formatted, msg.File.Name(), replyToDC)
+				} else {
+					dcID = dBot.SendMedia(formatted, msg.File.Name())
+				}
 				msg.File.Close()
 				os.Remove(msg.File.Name())
 			} else {
-				dcID = dBot.SendMessage(formatted)
+				if replyToDC != 0 {
+					dcID = dBot.SendMessageWithReply(formatted, replyToDC)
+				} else {
+					dcID = dBot.SendMessage(formatted)
+				}
 			}
 			if dcID != 0 {
 				storeMapping(msg.EventID, dcID)
@@ -277,6 +290,11 @@ func main() {
 			}
 
 			var mEventID id.EventID
+			replyToMatrix := id.EventID("")
+			if msg.ReplyTo != 0 {
+				replyToMatrix = getMatrixID(msg.ReplyTo)
+			}
+
 			if msg.File != nil {
 				mBot.SendMessage(fmt.Sprintf("[deltachat] %s:", msg.SenderName))
 				mType := event.MsgImage
@@ -286,12 +304,20 @@ func main() {
 				case ".mp3", ".ogg", ".wav": mType = event.MsgAudio
 				default: mType = event.MsgImage
 				}
-				mEventID = mBot.SendMedia(msg.Body, msg.File.Name(), mType)
+				if replyToMatrix != "" {
+					mEventID = mBot.SendMediaWithReply(msg.Body, msg.File.Name(), mType, replyToMatrix)
+				} else {
+					mEventID = mBot.SendMedia(msg.Body, msg.File.Name(), mType)
+				}
 				msg.File.Close()
 				os.Remove(msg.File.Name())
 			} else {
 				formatted := fmt.Sprintf("[deltachat] %s: %s", msg.SenderName, msg.Body)
-				mEventID = mBot.SendMessage(formatted)
+				if replyToMatrix != "" {
+					mEventID = mBot.SendMessageWithReply(formatted, replyToMatrix)
+				} else {
+					mEventID = mBot.SendMessage(formatted)
+				}
 			}
 			if mEventID != "" {
 				storeMapping(mEventID, msg.MsgID)

@@ -60,6 +60,7 @@ type MatrixMessage struct {
 	EventID     id.EventID
 	IsEdit      bool
 	EditEventID id.EventID
+	ReplyTo     id.EventID
 }
 
 type MatrixReaction struct {
@@ -259,13 +260,19 @@ func (b *MatrixBot) Start(msgChan chan<- MatrixMessage, reactChan chan<- MatrixR
 		body := strings.TrimSpace(content.Body)
 		isEdit := false
 		var editID id.EventID
+		var replyTo id.EventID
 
-		// Handle Edits (RelatesTo in MessageEventContent is a pointer)
-		if content.RelatesTo != nil && content.RelatesTo.Type == event.RelReplace && content.RelatesTo.EventID != "" {
-			isEdit = true
-			editID = content.RelatesTo.EventID
-			if content.NewContent != nil {
-				body = strings.TrimSpace(content.NewContent.Body)
+		// Handle Edits/Replies (RelatesTo in MessageEventContent is a pointer)
+		if content.RelatesTo != nil {
+			if content.RelatesTo.Type == event.RelReplace && content.RelatesTo.EventID != "" {
+				isEdit = true
+				editID = content.RelatesTo.EventID
+				if content.NewContent != nil {
+					body = strings.TrimSpace(content.NewContent.Body)
+				}
+			}
+			if content.RelatesTo.InReplyTo != nil {
+				replyTo = content.RelatesTo.InReplyTo.EventID
 			}
 		}
 
@@ -287,6 +294,7 @@ func (b *MatrixBot) Start(msgChan chan<- MatrixMessage, reactChan chan<- MatrixR
 					EventID:     ev.ID,
 					IsEdit:      isEdit,
 					EditEventID: editID,
+					ReplyTo:     replyTo,
 				}
 			
 			case event.MsgImage, event.MsgVideo, event.MsgFile, event.MsgAudio:
@@ -303,6 +311,7 @@ func (b *MatrixBot) Start(msgChan chan<- MatrixMessage, reactChan chan<- MatrixR
 					EventID:     ev.ID,
 					IsEdit:      isEdit,
 					EditEventID: editID,
+					ReplyTo:     replyTo,
 				}
 			}
 		}
@@ -424,7 +433,32 @@ func (b *MatrixBot) SendMessage(text string) id.EventID {
 	return b.sendMessage(context.Background(), b.bridgedRoom, text)
 }
 
+func (b *MatrixBot) SendMessageWithReply(text string, replyTo id.EventID) id.EventID {
+	if b.bridgedRoom == "" {
+		return ""
+	}
+	content := &event.MessageEventContent{
+		MsgType: event.MsgText,
+		Body:    text,
+		RelatesTo: &event.RelatesTo{
+			InReplyTo: &event.InReplyTo{
+				EventID: replyTo,
+			},
+		},
+	}
+	resp, err := b.client.SendMessageEvent(context.Background(), b.bridgedRoom, event.EventMessage, content)
+	if err != nil {
+		log.Printf("Matrix: Error sending reply to %s: %v", b.bridgedRoom, err)
+		return ""
+	}
+	return resp.EventID
+}
+
 func (b *MatrixBot) SendMedia(text string, filePath string, msgType event.MessageType) id.EventID {
+	return b.SendMediaWithReply(text, filePath, msgType, "")
+}
+
+func (b *MatrixBot) SendMediaWithReply(text string, filePath string, msgType event.MessageType, replyTo id.EventID) id.EventID {
 	if b.bridgedRoom == "" {
 		return ""
 	}
@@ -476,6 +510,14 @@ func (b *MatrixBot) SendMedia(text string, filePath string, msgType event.Messag
 			Width:    width,
 			Height:   height,
 		},
+	}
+
+	if replyTo != "" {
+		content.RelatesTo = &event.RelatesTo{
+			InReplyTo: &event.InReplyTo{
+				EventID: replyTo,
+			},
+		}
 	}
 
 	respMsg, err := b.client.SendMessageEvent(ctx, b.bridgedRoom, event.EventMessage, content)
