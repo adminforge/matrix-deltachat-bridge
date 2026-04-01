@@ -262,7 +262,8 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 		}
 
 		replyTo := uint32(0)
-		if msg.ParentId != nil {
+		// Only treat as reply if there is an actual quote present in the message data
+		if msg.ParentId != nil && len(msg.Quote) > 0 && string(msg.Quote) != "null" {
 			replyTo = *msg.ParentId
 		}
 
