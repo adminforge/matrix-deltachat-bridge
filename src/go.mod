@@ -7,6 +7,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/mattn/go-sqlite3 v1.14.34
 	go.mau.fi/util v0.9.7
+	golang.org/x/image v0.38.0
 	maunium.net/go/mautrix v0.26.4
 )
 

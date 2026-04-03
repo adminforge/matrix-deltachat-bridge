@@ -9,9 +9,11 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+	_ "golang.org/x/image/webp"
 	"io"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,6 +23,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"go.mau.fi/util/dbutil"
 	"maunium.net/go/mautrix"
+	"maunium.net/go/mautrix/crypto/attachment"
 	"maunium.net/go/mautrix/crypto/cryptohelper"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
@@ -279,6 +282,7 @@ func (b *MatrixBot) Start(msgChan chan<- MatrixMessage, reactChan chan<- MatrixR
 		// Check for Admin Commands
 		if isAdminMatrix(ev.Sender, b.adminUsers) {
 			if ev.RoomID != b.bridgedRoom || strings.HasPrefix(body, "/") {
+				// Process commands BEFORE deduplication to ensure DM responses work even after decryption re-dispatch
 				b.handleCommand(ctx, ev.RoomID, body, onJoin)
 				return
 			}
@@ -454,11 +458,11 @@ func (b *MatrixBot) SendMessageWithReply(text string, replyTo id.EventID) id.Eve
 	return resp.EventID
 }
 
-func (b *MatrixBot) SendMedia(text string, filePath string, msgType event.MessageType) id.EventID {
-	return b.SendMediaWithReply(text, filePath, msgType, "")
+func (b *MatrixBot) SendMedia(text string, filePath string, msgType event.MessageType, mimeType string) id.EventID {
+	return b.SendMediaWithReply(text, filePath, msgType, mimeType, "")
 }
 
-func (b *MatrixBot) SendMediaWithReply(text string, filePath string, msgType event.MessageType, replyTo id.EventID) id.EventID {
+func (b *MatrixBot) SendMediaWithReply(text string, filePath string, msgType event.MessageType, mimeType string, replyTo id.EventID) id.EventID {
 	if b.bridgedRoom == "" {
 		return ""
 	}
@@ -466,46 +470,73 @@ func (b *MatrixBot) SendMediaWithReply(text string, filePath string, msgType eve
 	ctx := context.Background()
 	file, err := os.Open(filePath)
 	if err != nil {
+		log.Printf("Matrix: Error opening file %s: %v", filePath, err)
 		return ""
 	}
 	defer file.Close()
 
-	stat, _ := file.Stat()
-	mime := "application/octet-stream"
-	ext := strings.ToLower(filepath.Ext(filePath))
-	
-	var width, height int
-	if msgType == event.MsgImage {
-		if cfg, _, err := image.DecodeConfig(file); err == nil {
-			width = cfg.Width
-			height = cfg.Height
-		}
-		file.Seek(0, 0)
-	}
-
-	switch ext {
-	case ".jpg", ".jpeg": mime = "image/jpeg"
-	case ".png": mime = "image/png"
-	case ".gif": mime = "image/gif"
-	case ".mp4": mime = "video/mp4"
-	}
-
-	resp, err := b.client.UploadMedia(ctx, mautrix.ReqUploadMedia{
-		Content:       file,
-		ContentLength: stat.Size(),
-		ContentType:   mime,
-		FileName:      filepath.Base(filePath),
-	})
+	data, err := io.ReadAll(file)
 	if err != nil {
+		log.Printf("Matrix: Error reading file %s: %v", filePath, err)
 		return ""
 	}
 
+	// Robust MIME type detection
+	mime := mimeType
+	if mime == "" {
+		mime = http.DetectContentType(data[:min(512, len(data))])
+	}
+	ext := strings.ToLower(filepath.Ext(filePath))
+	
+	// Force correct MIME type for common extensions if detection failed or is generic
+	if mime == "" || mime == "application/octet-stream" || strings.HasPrefix(mime, "text/") {
+		switch ext {
+		case ".jpg", ".jpeg": mime = "image/jpeg"
+		case ".png": mime = "image/png"
+		case ".gif": mime = "image/gif"
+		case ".webp": mime = "image/webp"
+		case ".mp4": mime = "video/mp4"
+		case ".webm": mime = "video/webm"
+		case ".mp3": mime = "audio/mpeg"
+		case ".ogg": mime = "audio/ogg"
+		case ".wav": mime = "audio/wav"
+		case ".m4a": mime = "audio/mp4"
+		case ".aac": mime = "audio/m4a"
+		}
+	}
+
+	var width, height int
+	finalMsgType := msgType
+	if finalMsgType == event.MsgImage || strings.HasPrefix(mime, "image/") {
+		if cfg, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
+			width = cfg.Width
+			height = cfg.Height
+		} else {
+			log.Printf("Matrix: Error decoding image config for %s: %v", filePath, err)
+		}
+		finalMsgType = event.MsgImage
+	} else if finalMsgType == event.MsgVideo || strings.HasPrefix(mime, "video/") {
+		finalMsgType = event.MsgVideo
+	} else if finalMsgType == event.MsgAudio || strings.HasPrefix(mime, "audio/") {
+		finalMsgType = event.MsgAudio
+	}
+
+	body := text
+	if body == "" || body == "[matrix]" || body == "[deltachat]" {
+		body = filepath.Base(filePath)
+	}
+	
+	// Element PC sometimes refuses to render inline images if the body doesn't look like a file.
+	// Ensure body has an extension.
+	if !strings.HasSuffix(strings.ToLower(body), ext) && ext != "" && ext != ".bin" {
+		body = body + " " + filepath.Base(filePath)
+	}
+
 	content := &event.MessageEventContent{
-		MsgType: msgType,
-		Body:    filepath.Base(filePath),
-		URL:     resp.ContentURI.CUString(),
+		MsgType: finalMsgType,
+		Body:    body,
 		Info: &event.FileInfo{
-			Size:     int(stat.Size()),
+			Size:     len(data),
 			MimeType: mime,
 			Width:    width,
 			Height:   height,
@@ -520,8 +551,46 @@ func (b *MatrixBot) SendMediaWithReply(text string, filePath string, msgType eve
 		}
 	}
 
+	// Check if the room is encrypted
+	isEncrypted := false
+	if b.cryptoHelper != nil {
+		isEncrypted, _ = b.cryptoHelper.Machine().StateStore.IsEncrypted(ctx, b.bridgedRoom)
+	}
+
+	if isEncrypted {
+		ef := attachment.NewEncryptedFile()
+		encryptedData := ef.Encrypt(data)
+		resp, err := b.client.UploadMedia(ctx, mautrix.ReqUploadMedia{
+			Content:       bytes.NewReader(encryptedData),
+			ContentLength: int64(len(encryptedData)),
+			ContentType:   "application/octet-stream",
+			FileName:      filepath.Base(filePath),
+		})
+		if err != nil {
+			log.Printf("Matrix: Error uploading encrypted media: %v", err)
+			return ""
+		}
+		content.File = &event.EncryptedFileInfo{
+			EncryptedFile: *ef,
+			URL:           resp.ContentURI.CUString(),
+		}
+	} else {
+		resp, err := b.client.UploadMedia(ctx, mautrix.ReqUploadMedia{
+			Content:       bytes.NewReader(data),
+			ContentLength: int64(len(data)),
+			ContentType:   mime,
+			FileName:      filepath.Base(filePath),
+		})
+		if err != nil {
+			log.Printf("Matrix: Error uploading media: %v", err)
+			return ""
+		}
+		content.URL = resp.ContentURI.CUString()
+	}
+
 	respMsg, err := b.client.SendMessageEvent(ctx, b.bridgedRoom, event.EventMessage, content)
 	if err != nil {
+		log.Printf("Matrix: Error sending message event: %v", err)
 		return ""
 	}
 	return respMsg.EventID

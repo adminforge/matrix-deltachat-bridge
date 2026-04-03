@@ -33,11 +33,14 @@ type SafeMessage struct {
 	State         uint32              `json:"state"`
 	IsInfo        bool                `json:"isInfo"`
 	ViewType      deltachat.Viewtype  `json:"viewType"`
-	File          *string             `json:"file"`
+	File          *string             `json:"file,omitempty"`
+	FileMime      *string             `json:"fileMime,omitempty"`
+	FileName      *string             `json:"fileName,omitempty"`
+	FileBytes     uint64              `json:"fileBytes"`
 	Text          string              `json:"text"`
 	IsEdited      bool                `json:"isEdited"`
-	OriginalMsgId *uint32             `json:"originalMsgId"`
-	ParentId      *uint32             `json:"parentId"`
+	OriginalMsgId *uint32             `json:"originalMsgId,omitempty"`
+	ParentId      *uint32             `json:"parentId,omitempty"`
 	Quote         json.RawMessage     `json:"quote"`
 }
 
@@ -54,6 +57,7 @@ type DeltaChatMessage struct {
 	SenderName string
 	Body       string
 	File       *os.File
+	FileMime   string
 	MsgID      uint32
 	IsEdit     bool
 	EditMsgID  uint32
@@ -88,6 +92,52 @@ func isAdminDC(addr string, admins []string) bool {
 		}
 	}
 	return false
+}
+
+func isMediaViewType(vt deltachat.Viewtype) bool {
+	switch vt {
+	case deltachat.ViewtypeImage, deltachat.ViewtypeGif, deltachat.ViewtypeVideo,
+		deltachat.ViewtypeAudio, deltachat.ViewtypeVoice, deltachat.ViewtypeFile,
+		deltachat.ViewtypeSticker:
+		return true
+	}
+	return false
+}
+
+func mimeToExt(mime string) string {
+	if mime == "" {
+		return ".bin"
+	}
+	switch strings.ToLower(mime) {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "image/bmp":
+		return ".bmp"
+	case "image/tiff":
+		return ".tiff"
+	case "video/mp4":
+		return ".mp4"
+	case "video/webm":
+		return ".webm"
+	case "audio/mpeg", "audio/mp3":
+		return ".mp3"
+	case "audio/ogg":
+		return ".ogg"
+	case "audio/wav":
+		return ".wav"
+	case "audio/mp4", "audio/m4a":
+		return ".m4a"
+	case "audio/aac":
+		return ".aac"
+	default:
+		return ".bin"
+	}
 }
 
 func NewDeltaChatBot(dbPath, adminList, botName string) (*DeltaChatBot, error) {
@@ -313,28 +363,84 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 
 		// RELAYING
 		if msg.ChatId == b.chatId {
-			if msg.File != nil && !isEdit {
-				tmpFile, err := os.CreateTemp("", "dc-bridge-*")
-				if err == nil {
-					ext := sanitizeExtDC(filepath.Ext(*msg.File))
-					tmpFilePath := tmpFile.Name() + ext
-					tmpFile.Close()
+			cleanText := strings.TrimSpace(msg.Text)
+
+			// Media handling: use ViewType for robust detection instead of File field
+			hasMedia := isMediaViewType(msg.ViewType) && !isEdit
+			
+			// Fallback: detect media by text content if ViewType is Unknown/Text but it looks like an image/video/file
+			if !hasMedia && !isEdit && (strings.HasPrefix(cleanText, "[Image ") || strings.HasPrefix(cleanText, "[Video ") || strings.HasPrefix(cleanText, "[File ")) {
+				hasMedia = true
+			}
+
+			if hasMedia {
+				// Retry fetching message if it looks like media but has no file path yet
+				if msg.File == nil || *msg.File == "" {
 					
-					err = b.rpc.SaveMsgFile(accId, msgId, tmpFilePath)
-					if err == nil {
-						finalFile, _ := os.Open(tmpFilePath)
-						msgChan <- DeltaChatMessage{
-							SenderName: senderName,
-							Body:       msg.Text,
-							File:       finalFile,
-							MsgID:      msgId,
-							IsEdit:     isEdit,
-							EditMsgID:  editMsgID,
-							ReplyTo:    replyTo,
+					for retries := 0; retries < 6; retries++ {
+						time.Sleep(500 * time.Millisecond)
+						var retryMsg SafeMessage
+						if err := b.rpc.Transport.CallResult(context.Background(), &retryMsg, "get_message", accId, msgId); err == nil {
+							msg = &retryMsg
+							if msg.File != nil && *msg.File != "" {
+								break // Got the file!
+							}
 						}
-						return
 					}
-					os.Remove(tmpFilePath)
+				}
+
+				// Determine file extension from multiple sources (fileName > file path > MIME)
+				ext := ".bin"
+				if msg.FileName != nil && *msg.FileName != "" {
+					if e := sanitizeExtDC(filepath.Ext(*msg.FileName)); e != ".bin" {
+						ext = e
+					}
+				}
+				if ext == ".bin" && msg.File != nil && *msg.File != "" {
+					if e := sanitizeExtDC(filepath.Ext(*msg.File)); e != ".bin" {
+						ext = e
+					}
+				}
+				if ext == ".bin" && msg.FileMime != nil && *msg.FileMime != "" {
+					ext = mimeToExt(*msg.FileMime)
+				}
+
+				tmpFile, err := os.CreateTemp("", "dc-bridge-*"+ext)
+				if err != nil {
+					log.Printf("DeltaChat: Error creating temp file for msg %d: %v", msgId, err)
+				} else {
+					tmpFilePath := tmpFile.Name()
+					tmpFile.Close()
+					os.Remove(tmpFilePath) // Remove so SaveMsgFile can create it fresh
+
+					err = b.rpc.SaveMsgFile(accId, msgId, tmpFilePath)
+					if err != nil {
+						log.Printf("DeltaChat: Error saving file for msg %d to %s: %v", msgId, tmpFilePath, err)
+						os.Remove(tmpFilePath)
+					} else {
+						finalFile, err := os.Open(tmpFilePath)
+						if err != nil {
+							log.Printf("DeltaChat: Error opening saved file %s: %v", tmpFilePath, err)
+							os.Remove(tmpFilePath)
+						} else {
+							mime := ""
+							if msg.FileMime != nil {
+								mime = *msg.FileMime
+							}
+
+							msgChan <- DeltaChatMessage{
+								SenderName: senderName,
+								Body:       msg.Text,
+								File:       finalFile,
+								FileMime:   mime,
+								MsgID:      msgId,
+								IsEdit:     isEdit,
+								EditMsgID:  editMsgID,
+								ReplyTo:    replyTo,
+							}
+							return
+						}
+					}
 				}
 			}
 
@@ -351,12 +457,12 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 		}
 	})
 
-	// Handle Reactions
-	b.bot.On(&deltachat.EventTypeIncomingReaction{}, func(bot *deltachat.Bot, accId uint32, event deltachat.EventType) {
+	// Handle Reactions (DC -> Matrix)
+	b.bot.On(&deltachat.EventTypeReactionsChanged{}, func(bot *deltachat.Bot, accId uint32, event deltachat.EventType) {
 		if accId != b.accId {
 			return
 		}
-		ev := event.(*deltachat.EventTypeIncomingReaction)
+		ev := event.(*deltachat.EventTypeReactionsChanged)
 		if ev.ChatId != b.chatId {
 			return
 		}
@@ -370,10 +476,21 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 			}
 		}
 
-		reactChan <- DeltaChatReaction{
-			SenderName: senderName,
-			Emoji:      ev.Reaction,
-			RelatesTo:  ev.MsgId,
+		// Fetch all reactions for this message to discover what the contact reacted with
+		reactions, err := bot.Rpc.GetMessageReactions(accId, ev.MsgId)
+		if err == nil && reactions != nil {
+			for contactStr, emojis := range reactions.ReactionsByContact {
+				if contactStr == fmt.Sprintf("%d", ev.ContactId) && len(emojis) > 0 {
+					// We just relay the emojis they added
+					for _, emoji := range emojis {
+						reactChan <- DeltaChatReaction{
+							SenderName: senderName,
+							Emoji:      emoji,
+							RelatesTo:  ev.MsgId,
+						}
+					}
+				}
+			}
 		}
 	})
 
@@ -492,63 +609,26 @@ func (b *DeltaChatBot) SendMedia(text string, filePath string) uint32 {
 	if b.chatId == 0 {
 		return 0
 	}
-
-	ext := strings.ToLower(filepath.Ext(filePath))
-	viewType := deltachat.ViewtypeFile
-	switch ext {
-	case ".jpg", ".jpeg", ".png":
-		viewType = deltachat.ViewtypeImage
-	case ".gif":
-		viewType = deltachat.ViewtypeGif
-	case ".mp4", ".mov", ".avi":
-		viewType = deltachat.ViewtypeVideo
-	case ".mp3", ".ogg", ".wav":
-		viewType = deltachat.ViewtypeAudio
-	}
-
 	filename := filepath.Base(filePath)
-	msgId, err := b.rpc.SendMsg(b.accId, b.chatId, deltachat.MessageData{
-		Text:     &text,
-		File:     &filePath,
-		Filename: &filename,
-		Viewtype: &viewType,
-	})
+	pair, err := b.rpc.MiscSendMsg(b.accId, b.chatId, &text, &filePath, &filename, nil, nil)
 	if err != nil {
+		log.Printf("DeltaChat: Error sending media: %v", err)
 		return 0
 	}
-	return msgId
+	return pair.First
 }
 
 func (b *DeltaChatBot) SendMediaWithReply(text string, filePath string, replyTo uint32) uint32 {
 	if b.chatId == 0 {
 		return 0
 	}
-
-	ext := strings.ToLower(filepath.Ext(filePath))
-	viewType := deltachat.ViewtypeFile
-	switch ext {
-	case ".jpg", ".jpeg", ".png":
-		viewType = deltachat.ViewtypeImage
-	case ".gif":
-		viewType = deltachat.ViewtypeGif
-	case ".mp4", ".mov", ".avi":
-		viewType = deltachat.ViewtypeVideo
-	case ".mp3", ".ogg", ".wav":
-		viewType = deltachat.ViewtypeAudio
-	}
-
 	filename := filepath.Base(filePath)
-	msgId, err := b.rpc.SendMsg(b.accId, b.chatId, deltachat.MessageData{
-		Text:            &text,
-		File:            &filePath,
-		Filename:        &filename,
-		Viewtype:        &viewType,
-		QuotedMessageId: &replyTo,
-	})
+	pair, err := b.rpc.MiscSendMsg(b.accId, b.chatId, &text, &filePath, &filename, nil, &replyTo)
 	if err != nil {
+		log.Printf("DeltaChat: Error sending media reply: %v", err)
 		return 0
 	}
-	return msgId
+	return pair.First
 }
 
 func (b *DeltaChatBot) React(msgId uint32, emoji string) error {

@@ -225,7 +225,10 @@ func main() {
 			}
 			
 			cleanUser := stripMatrixUser(msg.Sender)
-			formatted := fmt.Sprintf("[matrix] %s: %s", cleanUser, msg.Body)
+			formatted := fmt.Sprintf("[matrix] %s", cleanUser)
+			if msg.Body != "" {
+				formatted = fmt.Sprintf("[matrix] %s: %s", cleanUser, msg.Body)
+			}
 
 			if msg.IsEdit {
 				dcID := getDCID(msg.EditEventID)
@@ -267,7 +270,10 @@ func main() {
 		for react := range matrixReactChan {
 			dcID := getDCID(react.RelatesTo)
 			if dcID != 0 {
-				dBot.React(dcID, react.Emoji)
+				err := dBot.React(dcID, react.Emoji)
+				if err != nil {
+					log.Printf("Bridge: Warning: Error sending reaction to DC: %v", err)
+				}
 			}
 		}
 	}()
@@ -296,18 +302,28 @@ func main() {
 			}
 
 			if msg.File != nil {
-				mBot.SendMessage(fmt.Sprintf("[deltachat] %s:", msg.SenderName))
-				mType := event.MsgImage
+				mType := event.MsgFile
 				ext := strings.ToLower(filepath.Ext(msg.File.Name()))
 				switch ext {
-				case ".mp4", ".mov", ".avi": mType = event.MsgVideo
-				case ".mp3", ".ogg", ".wav": mType = event.MsgAudio
-				default: mType = event.MsgImage
+				case ".mp4", ".mov", ".avi", ".webm": 
+					mType = event.MsgVideo
+				case ".mp3", ".ogg", ".wav", ".m4a", ".aac": 
+					mType = event.MsgAudio
+				case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff":
+					mType = event.MsgImage
+				default:
+					mType = event.MsgFile
 				}
+				formatted := fmt.Sprintf("[deltachat] %s", msg.SenderName)
+				// If the body is just a generic DC placeholder, don't include it in the Matrix caption to avoid dual-captions
+				if msg.Body != "" && !strings.HasPrefix(msg.Body, "[Image ") && !strings.HasPrefix(msg.Body, "[Video ") && !strings.HasPrefix(msg.Body, "[File ") {
+					formatted = fmt.Sprintf("[deltachat] %s: %s", msg.SenderName, msg.Body)
+				}
+				
 				if replyToMatrix != "" {
-					mEventID = mBot.SendMediaWithReply(msg.Body, msg.File.Name(), mType, replyToMatrix)
+					mEventID = mBot.SendMediaWithReply(formatted, msg.File.Name(), mType, msg.FileMime, replyToMatrix)
 				} else {
-					mEventID = mBot.SendMedia(msg.Body, msg.File.Name(), mType)
+					mEventID = mBot.SendMedia(formatted, msg.File.Name(), mType, msg.FileMime)
 				}
 				msg.File.Close()
 				os.Remove(msg.File.Name())
@@ -331,6 +347,9 @@ func main() {
 			mEventID := getMatrixID(react.RelatesTo)
 			if mEventID != "" {
 				emojis := strings.Fields(react.Emoji)
+				if len(emojis) == 0 && react.Emoji != "" {
+					emojis = []string{react.Emoji} // ensure single emojis aren't trimmed away incorrectly by Fields
+				}
 				for _, emoji := range emojis {
 					mBot.React(mEventID, emoji)
 				}
@@ -338,7 +357,7 @@ func main() {
 		}
 	}()
 
-	// Start Bots
+	// Matrix -> Delta Chat Reactions  (we missed putting these logs earlier, let's also update the matrix react loop if it exists... Wait, where is the matrixReactChan handled? It's handled earlier!)
 	go func() {
 		err := mBot.Start(matrixToDcChan, matrixReactChan, func(roomId id.RoomID) {
 			cfg.MatrixRoom = roomId
