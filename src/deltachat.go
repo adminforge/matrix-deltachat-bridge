@@ -478,6 +478,7 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 
 		// Fetch all reactions for this message to discover what the contact reacted with
 		reactions, err := bot.Rpc.GetMessageReactions(accId, ev.MsgId)
+
 		if err == nil && reactions != nil {
 			for contactStr, emojis := range reactions.ReactionsByContact {
 				if contactStr == fmt.Sprintf("%d", ev.ContactId) && len(emojis) > 0 {

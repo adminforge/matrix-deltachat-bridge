@@ -345,6 +345,7 @@ func main() {
 	go func() {
 		for react := range dcReactChan {
 			mEventID := getMatrixID(react.RelatesTo)
+
 			if mEventID != "" {
 				emojis := strings.Fields(react.Emoji)
 				if len(emojis) == 0 && react.Emoji != "" {
