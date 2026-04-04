@@ -36,7 +36,6 @@ type SafeMessage struct {
 	File          *string             `json:"file,omitempty"`
 	FileMime      *string             `json:"fileMime,omitempty"`
 	FileName      *string             `json:"fileName,omitempty"`
-	FileBytes     uint64              `json:"fileBytes"`
 	Text          string              `json:"text"`
 	IsEdited      bool                `json:"isEdited"`
 	OriginalMsgId *uint32             `json:"originalMsgId,omitempty"`
@@ -94,52 +93,6 @@ func isAdminDC(addr string, admins []string) bool {
 	return false
 }
 
-func isMediaViewType(vt deltachat.Viewtype) bool {
-	switch vt {
-	case deltachat.ViewtypeImage, deltachat.ViewtypeGif, deltachat.ViewtypeVideo,
-		deltachat.ViewtypeAudio, deltachat.ViewtypeVoice, deltachat.ViewtypeFile,
-		deltachat.ViewtypeSticker:
-		return true
-	}
-	return false
-}
-
-func mimeToExt(mime string) string {
-	if mime == "" {
-		return ".bin"
-	}
-	switch strings.ToLower(mime) {
-	case "image/jpeg":
-		return ".jpg"
-	case "image/png":
-		return ".png"
-	case "image/gif":
-		return ".gif"
-	case "image/webp":
-		return ".webp"
-	case "image/bmp":
-		return ".bmp"
-	case "image/tiff":
-		return ".tiff"
-	case "video/mp4":
-		return ".mp4"
-	case "video/webm":
-		return ".webm"
-	case "audio/mpeg", "audio/mp3":
-		return ".mp3"
-	case "audio/ogg":
-		return ".ogg"
-	case "audio/wav":
-		return ".wav"
-	case "audio/mp4", "audio/m4a":
-		return ".m4a"
-	case "audio/aac":
-		return ".aac"
-	default:
-		return ".bin"
-	}
-}
-
 func NewDeltaChatBot(dbPath, adminList, botName string) (*DeltaChatBot, error) {
 	trans := deltachat.NewIOTransport()
 	if err := trans.Open(); err != nil {
@@ -166,7 +119,11 @@ func NewDeltaChatBot(dbPath, adminList, botName string) (*DeltaChatBot, error) {
 	var email string
 
 	if len(accIds) == 0 {
-		log.Printf("DeltaChat: No account found. Requesting new email from chat.adminforge.de...")
+		if strings.ToLower(os.Getenv("DELTACHAT_ALLOW_NEW_ACCOUNT")) != "true" {
+			return nil, fmt.Errorf("no existing Delta Chat account found and DELTACHAT_ALLOW_NEW_ACCOUNT is not set to true. Aborting to prevent accidental new registration")
+		}
+
+		log.Printf("DeltaChat: No account found and DELTACHAT_ALLOW_NEW_ACCOUNT is true. Requesting new email from chat.adminforge.de...")
 		resp, err := http.Get("https://chat.adminforge.de/new_email")
 		if err != nil {
 			return nil, fmt.Errorf("failed to request new email: %w", err)
@@ -223,7 +180,7 @@ func NewDeltaChatBot(dbPath, adminList, botName string) (*DeltaChatBot, error) {
 		log.Printf("DeltaChat: Using existing account %d (%s)", accId, email)
 
 		// Re-enforce stable ports even for existing accounts
-		mailServer := "chat.adminforge.de"
+		mailServer := "ssl://chat.adminforge.de"
 		mailPort := "993"
 		smtpPort := "465"
 		secVal := "2" // SSL/TLS (Implicit)
@@ -241,15 +198,15 @@ func NewDeltaChatBot(dbPath, adminList, botName string) (*DeltaChatBot, error) {
 		
 		// Force re-configure to apply security and encryption settings
 		if err := rpc.Configure(accId); err != nil {
-			log.Printf("DeltaChat: Re-configure failed: %v", err)
+			log.Printf("DeltaChat: Re-configure update: %v (often non-fatal)", err)
 		}
 	}
 
 	rpc.SetConfig(accId, "displayname", &botName)
 
-	log.Printf("DeltaChat: Waiting for account to be ready...")
+	log.Printf("DeltaChat: Waiting for account to be ready (timeout 120s)...")
 	configured := false
-	for i := 0; i < 60; i++ {
+	for i := 0; i < 120; i++ {
 		ok, err := rpc.IsConfigured(accId)
 		if err == nil && ok {
 			configured = true
@@ -259,10 +216,10 @@ func NewDeltaChatBot(dbPath, adminList, botName string) (*DeltaChatBot, error) {
 	}
 
 	if !configured {
-		return nil, fmt.Errorf("account configuration timed out")
+		log.Printf("DeltaChat: Warning: Account configuration timed out, starting bot loop anyway...")
+	} else {
+		log.Printf("DeltaChat: Account %s is ready!", email)
 	}
-
-	log.Printf("DeltaChat: Account %s is ready!", email)
 
 	// Ensure admin contacts are created
 	for _, adminAddr := range admins {
@@ -363,84 +320,33 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 
 		// RELAYING
 		if msg.ChatId == b.chatId {
-			cleanText := strings.TrimSpace(msg.Text)
-
-			// Media handling: use ViewType for robust detection instead of File field
-			hasMedia := isMediaViewType(msg.ViewType) && !isEdit
-			
-			// Fallback: detect media by text content if ViewType is Unknown/Text but it looks like an image/video/file
-			if !hasMedia && !isEdit && (strings.HasPrefix(cleanText, "[Image ") || strings.HasPrefix(cleanText, "[Video ") || strings.HasPrefix(cleanText, "[File ")) {
-				hasMedia = true
-			}
-
-			if hasMedia {
-				// Retry fetching message if it looks like media but has no file path yet
-				if msg.File == nil || *msg.File == "" {
-					
-					for retries := 0; retries < 6; retries++ {
-						time.Sleep(500 * time.Millisecond)
-						var retryMsg SafeMessage
-						if err := b.rpc.Transport.CallResult(context.Background(), &retryMsg, "get_message", accId, msgId); err == nil {
-							msg = &retryMsg
-							if msg.File != nil && *msg.File != "" {
-								break // Got the file!
-							}
-						}
-					}
-				}
-
-				// Determine file extension from multiple sources (fileName > file path > MIME)
-				ext := ".bin"
-				if msg.FileName != nil && *msg.FileName != "" {
-					if e := sanitizeExtDC(filepath.Ext(*msg.FileName)); e != ".bin" {
-						ext = e
-					}
-				}
-				if ext == ".bin" && msg.File != nil && *msg.File != "" {
-					if e := sanitizeExtDC(filepath.Ext(*msg.File)); e != ".bin" {
-						ext = e
-					}
-				}
-				if ext == ".bin" && msg.FileMime != nil && *msg.FileMime != "" {
-					ext = mimeToExt(*msg.FileMime)
-				}
-
-				tmpFile, err := os.CreateTemp("", "dc-bridge-*"+ext)
-				if err != nil {
-					log.Printf("DeltaChat: Error creating temp file for msg %d: %v", msgId, err)
-				} else {
-					tmpFilePath := tmpFile.Name()
+			if msg.File != nil && !isEdit {
+				tmpFile, err := os.CreateTemp("", "dc-bridge-*")
+				if err == nil {
+					ext := sanitizeExtDC(filepath.Ext(*msg.File))
+					tmpFilePath := tmpFile.Name() + ext
 					tmpFile.Close()
-					os.Remove(tmpFilePath) // Remove so SaveMsgFile can create it fresh
-
+					
 					err = b.rpc.SaveMsgFile(accId, msgId, tmpFilePath)
-					if err != nil {
-						log.Printf("DeltaChat: Error saving file for msg %d to %s: %v", msgId, tmpFilePath, err)
-						os.Remove(tmpFilePath)
-					} else {
-						finalFile, err := os.Open(tmpFilePath)
-						if err != nil {
-							log.Printf("DeltaChat: Error opening saved file %s: %v", tmpFilePath, err)
-							os.Remove(tmpFilePath)
-						} else {
-							mime := ""
-							if msg.FileMime != nil {
-								mime = *msg.FileMime
-							}
-
-							msgChan <- DeltaChatMessage{
-								SenderName: senderName,
-								Body:       msg.Text,
-								File:       finalFile,
-								FileMime:   mime,
-								MsgID:      msgId,
-								IsEdit:     isEdit,
-								EditMsgID:  editMsgID,
-								ReplyTo:    replyTo,
-							}
-							return
+					if err == nil {
+						finalFile, _ := os.Open(tmpFilePath)
+						mime := ""
+						if msg.FileMime != nil {
+							mime = *msg.FileMime
 						}
+						msgChan <- DeltaChatMessage{
+							SenderName: senderName,
+							Body:       msg.Text,
+							File:       finalFile,
+							FileMime:   mime,
+							MsgID:      msgId,
+							IsEdit:     isEdit,
+							EditMsgID:  editMsgID,
+							ReplyTo:    replyTo,
+						}
+						return
 					}
+					os.Remove(tmpFilePath)
 				}
 			}
 

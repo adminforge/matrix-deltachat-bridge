@@ -192,10 +192,17 @@ func main() {
 	}
 
 	log.Println("Bridge: Initializing Delta Chat bot...")
-	dBot, err := NewDeltaChatBot(dbPath, dcAdmin, dcBotName)
-	if err != nil {
-		log.Fatalf("Failed to initialize Delta Chat bot: %v", err)
+	var dBot *DeltaChatBot
+	for {
+		dBot, err = NewDeltaChatBot(dbPath, dcAdmin, dcBotName)
+		if err != nil {
+			log.Printf("Bridge: Failed to initialize Delta Chat bot: %v. Retrying in 60s...", err)
+			time.Sleep(60 * time.Second)
+			continue
+		}
+		break
 	}
+
 	if cfg.DCChatID != 0 {
 		dBot.SetBridgedChat(cfg.DCChatID)
 	}
