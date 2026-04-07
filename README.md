@@ -7,41 +7,46 @@ Diese Brücke ermöglicht die bidirektionale Synchronisation von Textnachrichten
 - **Bidirektionales Relaying:** Nachrichten werden in Echtzeit zwischen beiden Plattformen gespiegelt.
 - **Matrix E2EE:** Volle Unterstützung für Ende-zu-Ende-Verschlüsselung in Matrix-Räumen.
 - **Rich Media:** Bilder, Videos und Audio-Dateien werden direkt eingebettet übertragen.
+- **Native Replies:** Bidirectional synchronization of message replies.
 - **Native Reactions:** Emojis werden bidirektional synchronisiert und akkumuliert.
 - **Automatisches Setup:** Erstellt bei Bedarf automatisch ein Delta Chat Konto.
 - **Einfache Steuerung:** Verwaltung über einfache `/set` Befehle direkt in den Zielräumen.
 - **Sicherheit:** Nur autorisierte Admins können den Bot steuern oder in Räume einladen.
-- **Privatsphäre:** Keine Protokollierung von Nachrichten-Inhalten in den System-Logs.
-
-## Sicherheit (Hardening)
-
-Der Bot ist für einen sicheren Betrieb vorkonfiguriert:
-- **Non-Root:** Läuft unter User `1002:998`.
-- **Capabilities:** Alle unnötigen Linux-Capabilities sind entfernt (`cap_drop: ALL`).
-- **No New Privileges:** Verhindert Privilegieneskalation innerhalb des Containers.
-- **Resource Limits:** Begrenzt auf 0.5 CPU Kerne und 512 MB RAM.
-
-### Wichtig: Dateiberechtigungen
-Damit der Bot in den `/data` Ordner schreiben kann, müssen die Berechtigungen auf dem Host-System einmalig angepasst werden:
-
-```bash
-chown -R 1002:998 ./data
-```
 
 ## Schnellstart (Docker Compose)
 
-1.  **Konfiguration:**
-    Kopiere die Datei `.env.example` nach `.env` und passe die Werte an:
-    - `MATRIX_HOMESERVER`: Die URL deines Matrix-Servers (z.B. `https://matrix.org`).
-    - `MATRIX_ADMIN`: Kommagetrennte Liste von Matrix-IDs (z.B. `@alice:server.tld,@bob:server.tld`).
-    - `DELTACHAT_ADMIN`: Kommagetrennte Liste von Delta Chat Emails (z.B. `alice@dc.tld,bob@dc.tld`).
+Führe diese Befehle in einem neuen Verzeichnis auf deinem Server aus:
 
-2.  **Starten:**
+1.  **Dateien herunterladen:**
+    ```bash
+    wget https://git.adminforge.de/adminforge/matrix-deltachat-bridge/raw/branch/main/docker-compose.yml
+    wget https://git.adminforge.de/adminforge/matrix-deltachat-bridge/raw/branch/main/.env.example
+    ```
+
+2.  **Konfiguration:**
+    ```bash
+    mv .env.example .env
+    ```
+    Passe die Werte in der `.env` an:
+    - `MATRIX_HOMESERVER`: Die URL deines Matrix-Servers (z.B. `https://matrix.org`).
+    - `MATRIX_ADMIN`: Deine Matrix-ID (z.B. `@alice:server.tld`).
+    - `MATRIX_PICKLE_KEY`: Generiere einen Schlüssel mit `openssl rand -hex 32`.
+    - `DELTACHAT_ADMIN`: Deine Delta Chat Email (z.B. `alice@dc.tld`).
+    - `DELTACHAT_RELAY_SERVER`: Der Mail-Server (z.B. `chat.adminforge.de`).
+    - `BRIDGE_USER` & `BRIDGE_GROUP`: Die User/Group ID unter der der Bot laufen soll (Standard: 1002:998).
+
+    **Datenverzeichnis vorbereiten:**
+    ```bash
+    mkdir -p ./data
+    export $(grep -v '^#' .env | xargs) && chown -R $BRIDGE_USER:$BRIDGE_GROUP ./data
+    ```
+
+3.  **Starten:**
     ```bash
     docker compose up -d --build
     ```
 
-3.  **Verbindung herstellen:**
+4.  **Verbindung herstellen:**
     Prüfe die Logs, um die Einladungs-Links zu erhalten:
     ```bash
     docker compose logs bridge
@@ -54,14 +59,12 @@ chown -R 1002:998 ./data
 Sobald der Bot läuft und du ihn als Admin kontaktiert hast:
 
 ### 1. Matrix-Seite
-- Lade den Bot in den gewünschten Raum ein. (Nur Admins können den Bot erfolgreich einladen).
+- Lade den Bot in den gewünschten Raum ein.
 - Schreibe innerhalb dieses Raums den Befehl: `/set`
-- Der Bot bestätigt die Aktivierung der Brücke für diesen Raum.
 
 ### 2. Delta Chat Seite
-- Lade den Bot in die gewünschte Gruppe ein. (Nur Admins können den Bot erfolgreich einladen).
+- Lade den Bot in die gewünschte Gruppe ein.
 - Schreibe innerhalb dieser Gruppe den Befehl: `/set`
-- Der Bot bestätigt die Aktivierung der Brücke für diesen Chat.
 
 ---
 Betrieben mit ❤️ und erstellt mit 🤖 von adminForge.

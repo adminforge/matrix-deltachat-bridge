@@ -1,16 +1,15 @@
 services:
   bridge:
-    build: .
+    build:
+      context: https://git.adminforge.de/adminforge/matrix-deltachat-bridge.git
+      dockerfile: Dockerfile
     container_name: matrix-deltachat-bridge
     restart: unless-stopped
     volumes:
       - ./data:/data
     env_file:
       - .env
-    environment:
-      - TZ=Europe/Berlin
-      - RUST_LOG=deltachat=error,pgp=error,deltachat_rpc_server=error
-    user: "1002:998"
+    user: "${BRIDGE_USER}:${BRIDGE_GROUP}"
     tmpfs:
       - /tmp
     security_opt:
@@ -37,5 +36,6 @@ services:
 networks:
   bridge_net:
     driver: bridge
+    enable_ipv6: false
     driver_opts:
       com.docker.network.driver.mtu: 1400

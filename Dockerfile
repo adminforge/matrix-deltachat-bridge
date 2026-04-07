@@ -29,7 +29,8 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y \
     libssl3 libsqlite3-0 libolm3 ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "precedence ::ffff:0:0/96  100" > /etc/gai.conf
 
 # Copy binaries
 COPY --from=rust-builder /usr/local/cargo/bin/deltachat-rpc-server /usr/local/bin/

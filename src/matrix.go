@@ -165,7 +165,11 @@ func NewMatrixBot(homeserver, adminList, botName, envUser, envPass string, exist
 			return nil, fmt.Errorf("failed to create dbutil wrapper: %w", err)
 		}
 
-		pickleKey := []byte("matrix-bridge-pickle-key-1234567890")
+		envPickleKey := os.Getenv("MATRIX_PICKLE_KEY")
+		if envPickleKey == "" {
+			envPickleKey = "matrix-bridge-pickle-key-1234567890"
+		}
+		pickleKey := []byte(envPickleKey)
 		helper, err := cryptohelper.NewCryptoHelper(client, pickleKey, db)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create crypto helper: %w", err)
@@ -458,11 +462,11 @@ func (b *MatrixBot) SendMessageWithReply(text string, replyTo id.EventID) id.Eve
 	return resp.EventID
 }
 
-func (b *MatrixBot) SendMedia(text string, filePath string, msgType event.MessageType) id.EventID {
-	return b.SendMediaWithReply(text, filePath, msgType, "")
+func (b *MatrixBot) SendMedia(text string, filePath string, msgType event.MessageType, mimeType string) id.EventID {
+	return b.SendMediaWithReply(text, filePath, msgType, mimeType, "")
 }
 
-func (b *MatrixBot) SendMediaWithReply(text string, filePath string, msgType event.MessageType, replyTo id.EventID) id.EventID {
+func (b *MatrixBot) SendMediaWithReply(text string, filePath string, msgType event.MessageType, mimeType string, replyTo id.EventID) id.EventID {
 	if b.bridgedRoom == "" {
 		return ""
 	}
@@ -482,11 +486,14 @@ func (b *MatrixBot) SendMediaWithReply(text string, filePath string, msgType eve
 	}
 
 	// Robust MIME type detection
-	mime := http.DetectContentType(data[:min(512, len(data))])
+	mime := mimeType
+	if mime == "" {
+		mime = http.DetectContentType(data[:min(512, len(data))])
+	}
 	ext := strings.ToLower(filepath.Ext(filePath))
 	
 	// Force correct MIME type for common extensions if detection failed or is generic
-	if mime == "application/octet-stream" || strings.HasPrefix(mime, "text/") {
+	if mime == "" || mime == "application/octet-stream" || strings.HasPrefix(mime, "text/") {
 		switch ext {
 		case ".jpg", ".jpeg": mime = "image/jpeg"
 		case ".png": mime = "image/png"
@@ -518,6 +525,12 @@ func (b *MatrixBot) SendMediaWithReply(text string, filePath string, msgType eve
 	body := text
 	if body == "" || body == "[matrix]" || body == "[deltachat]" || body == "[matrix]: " || body == "[deltachat]: " {
 		body = filepath.Base(filePath)
+	}
+
+	// Element PC sometimes refuses to render inline images if the body doesn't look like a file.
+	// Ensure body has an extension.
+	if !strings.HasSuffix(strings.ToLower(body), ext) && ext != "" && ext != ".bin" {
+		body = body + " " + filepath.Base(filePath)
 	}
 
 	content := &event.MessageEventContent{

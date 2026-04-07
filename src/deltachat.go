@@ -93,52 +93,6 @@ func isAdminDC(addr string, admins []string) bool {
 	return false
 }
 
-func isMediaViewType(vt deltachat.Viewtype) bool {
-	switch vt {
-	case deltachat.ViewtypeImage, deltachat.ViewtypeGif, deltachat.ViewtypeVideo,
-		deltachat.ViewtypeAudio, deltachat.ViewtypeVoice, deltachat.ViewtypeFile,
-		deltachat.ViewtypeSticker:
-		return true
-	}
-	return false
-}
-
-func mimeToExt(mime string) string {
-	if mime == "" {
-		return ".bin"
-	}
-	switch strings.ToLower(mime) {
-	case "image/jpeg":
-		return ".jpg"
-	case "image/png":
-		return ".png"
-	case "image/gif":
-		return ".gif"
-	case "image/webp":
-		return ".webp"
-	case "image/bmp":
-		return ".bmp"
-	case "image/tiff":
-		return ".tiff"
-	case "video/mp4":
-		return ".mp4"
-	case "video/webm":
-		return ".webm"
-	case "audio/mpeg", "audio/mp3":
-		return ".mp3"
-	case "audio/ogg":
-		return ".ogg"
-	case "audio/wav":
-		return ".wav"
-	case "audio/mp4", "audio/m4a":
-		return ".m4a"
-	case "audio/aac":
-		return ".aac"
-	default:
-		return ".bin"
-	}
-}
-
 func NewDeltaChatBot(dbPath, adminList, botName string) (*DeltaChatBot, error) {
 	trans := deltachat.NewIOTransport()
 	if err := trans.Open(); err != nil {
@@ -164,11 +118,24 @@ func NewDeltaChatBot(dbPath, adminList, botName string) (*DeltaChatBot, error) {
 	var accId uint32
 	var email string
 
+	relayServer := os.Getenv("DELTACHAT_RELAY_SERVER")
+	if relayServer == "" {
+		return nil, fmt.Errorf("DELTACHAT_RELAY_SERVER environment variable is not set")
+	}
+	
+	// Clean hostname for HTTP requests
+	httpHost := strings.TrimPrefix(relayServer, "ssl://")
+	httpHost = strings.TrimPrefix(httpHost, "tls://")
+
 	if len(accIds) == 0 {
-		log.Printf("DeltaChat: No account found. Requesting new email from chat.adminforge.de...")
-		resp, err := http.Get("https://chat.adminforge.de/new_email")
+		if strings.ToLower(os.Getenv("DELTACHAT_ALLOW_NEW_ACCOUNT")) != "true" {
+			return nil, fmt.Errorf("no existing Delta Chat account found and DELTACHAT_ALLOW_NEW_ACCOUNT is not set to true. Aborting to prevent accidental new registration")
+		}
+
+		log.Printf("DeltaChat: No account found and DELTACHAT_ALLOW_NEW_ACCOUNT is true. Requesting new email from %s...", httpHost)
+		resp, err := http.Get(fmt.Sprintf("https://%s/new_email", httpHost))
 		if err != nil {
-			return nil, fmt.Errorf("failed to request new email: %w", err)
+			return nil, fmt.Errorf("failed to request new email from %s: %w", relayServer, err)
 		}
 		defer resp.Body.Close()
 
@@ -190,18 +157,17 @@ func NewDeltaChatBot(dbPath, adminList, botName string) (*DeltaChatBot, error) {
 		rpc.SetConfig(accId, "addr", &email)
 		rpc.SetConfig(accId, "mail_pw", &password)
 		
-		// Hardcode stable ports for chat.adminforge.de
-		mailServer := "chat.adminforge.de"
+		// Set server config (hostname only, port separate)
 		mailPort := "993"
-		smtpPort := "465"
-		secVal := "2" // SSL/TLS
+		sendPort := "465"
+		secVal := "1" // SSL/TLS (DC_SOCKET_SSL)
 		
-		rpc.SetConfig(accId, "mail_server", &mailServer)
+		rpc.SetConfig(accId, "mail_server", &relayServer)
 		rpc.SetConfig(accId, "mail_port", &mailPort)
 		rpc.SetConfig(accId, "mail_security", &secVal)
 		
-		rpc.SetConfig(accId, "send_server", &mailServer)
-		rpc.SetConfig(accId, "send_port", &smtpPort)
+		rpc.SetConfig(accId, "send_server", &relayServer)
+		rpc.SetConfig(accId, "send_port", &sendPort)
 		rpc.SetConfig(accId, "send_security", &secVal)
 
 		botVal := "1"
@@ -221,16 +187,16 @@ func NewDeltaChatBot(dbPath, adminList, botName string) (*DeltaChatBot, error) {
 		}
 		log.Printf("DeltaChat: Using existing account %d (%s)", accId, email)
 
-		// Re-enforce stable ports even for existing accounts
-		mailServer := "chat.adminforge.de"
+		// Set server config (hostname only, port separate)
 		mailPort := "993"
-		smtpPort := "465"
-		secVal := "2" // SSL/TLS (Implicit)
-		rpc.SetConfig(accId, "mail_server", &mailServer)
+		sendPort := "465"
+		secVal := "1" // SSL/TLS (DC_SOCKET_SSL)
+		
+		rpc.SetConfig(accId, "mail_server", &relayServer)
 		rpc.SetConfig(accId, "mail_port", &mailPort)
 		rpc.SetConfig(accId, "mail_security", &secVal)
-		rpc.SetConfig(accId, "send_server", &mailServer)
-		rpc.SetConfig(accId, "send_port", &smtpPort)
+		rpc.SetConfig(accId, "send_server", &relayServer)
+		rpc.SetConfig(accId, "send_port", &sendPort)
 		rpc.SetConfig(accId, "send_security", &secVal)
 
 		botVal := "1"
@@ -238,9 +204,9 @@ func NewDeltaChatBot(dbPath, adminList, botName string) (*DeltaChatBot, error) {
 		rpc.SetConfig(accId, "e2ee_enabled", &botVal)
 		rpc.SetConfig(accId, "mdns_enabled", &botVal)
 		
-		// Force re-configure to apply security and encryption settings
+		log.Printf("DeltaChat: Running Configure() to start services...")
 		if err := rpc.Configure(accId); err != nil {
-			log.Printf("DeltaChat: Re-configure update: %v (often non-fatal)", err)
+			log.Printf("DeltaChat: Initial Configure fail (expected if DNS/network not ready): %v", err)
 		}
 	}
 
@@ -258,7 +224,7 @@ func NewDeltaChatBot(dbPath, adminList, botName string) (*DeltaChatBot, error) {
 	}
 
 	if !configured {
-		log.Printf("DeltaChat: Warning: Account configuration timed out, starting bot loop anyway...")
+		log.Printf("DeltaChat: Warning: Account configuration taking long, continuing...")
 	} else {
 		log.Printf("DeltaChat: Account %s is ready!", email)
 	}

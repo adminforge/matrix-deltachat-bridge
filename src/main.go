@@ -223,8 +223,17 @@ func main() {
 			
 			cleanUser := stripMatrixUser(id.UserID(msg.Sender))
 			formatted := fmt.Sprintf("[matrix] %s", cleanUser)
+			
+			// For media, check if body is just a filename or a real caption
+			isCaption := false
 			if msg.Body != "" {
-				formatted = fmt.Sprintf("[matrix] %s: %s", cleanUser, msg.Body)
+				ext := strings.ToLower(filepath.Ext(msg.Body))
+				isGenericFile := ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".gif" || ext == ".webp" || ext == ".mp4" || ext == ".pdf"
+				
+				if !isGenericFile || strings.Contains(msg.Body, " ") {
+					formatted = fmt.Sprintf("[matrix] %s: %s", cleanUser, msg.Body)
+					isCaption = true
+				}
 			}
 
 			if msg.IsEdit {
@@ -242,6 +251,11 @@ func main() {
 			}
 
 			if msg.File != nil {
+				// If it wasn't a real caption, just use the sender info for the media text
+				if !isCaption {
+					formatted = fmt.Sprintf("[matrix] %s", cleanUser)
+				}
+				
 				if replyToDC != 0 {
 					dcID = dBot.SendMediaWithReply(formatted, msg.File.Name(), replyToDC)
 				} else {
@@ -250,6 +264,8 @@ func main() {
 				msg.File.Close()
 				os.Remove(msg.File.Name())
 			} else {
+				// For text messages, always use the formatted body with colon
+				formatted = fmt.Sprintf("[matrix] %s: %s", cleanUser, msg.Body)
 				if replyToDC != 0 {
 					dcID = dBot.SendMessageWithReply(formatted, replyToDC)
 				} else {
@@ -302,24 +318,28 @@ func main() {
 				mType := event.MsgFile
 				ext := strings.ToLower(filepath.Ext(msg.File.Name()))
 				switch ext {
-				case ".mp4", ".mov", ".avi", ".webm": 
+				case ".mp4", ".mov", ".avi", ".webm", ".mkv", ".m4v", ".3gp": 
 					mType = event.MsgVideo
-				case ".mp3", ".ogg", ".wav", ".m4a", ".aac": 
+				case ".mp3", ".ogg", ".wav", ".m4a", ".aac", ".flac", ".opus": 
 					mType = event.MsgAudio
-				case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff":
+				case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".heic", ".heif":
 					mType = event.MsgImage
 				default:
 					mType = event.MsgFile
 				}
+				
 				formatted := fmt.Sprintf("[deltachat] %s", msg.SenderName)
-				if msg.Body != "" {
+				// If the body is just a generic DC placeholder, don't include it in the Matrix caption to avoid dual-captions
+				if msg.Body != "" && !strings.HasPrefix(msg.Body, "[Image ") && !strings.HasPrefix(msg.Body, "[Video ") && !strings.HasPrefix(msg.Body, "[File ") {
 					formatted = fmt.Sprintf("[deltachat] %s: %s", msg.SenderName, msg.Body)
 				}
+				
 				if replyToMatrix != "" {
-					mEventID = mBot.SendMediaWithReply(formatted, msg.File.Name(), mType, replyToMatrix)
+					mEventID = mBot.SendMediaWithReply(formatted, msg.File.Name(), mType, msg.FileMime, replyToMatrix)
 				} else {
-					mEventID = mBot.SendMedia(formatted, msg.File.Name(), mType)
+					mEventID = mBot.SendMedia(formatted, msg.File.Name(), mType, msg.FileMime)
 				}
+
 				msg.File.Close()
 				os.Remove(msg.File.Name())
 			} else {
@@ -349,18 +369,28 @@ func main() {
 		}
 	}()
 
-	mBot.Start(matrixToDcChan, matrixReactChan, func(roomId id.RoomID) {
-		cfg.MatrixRoom = roomId
-		saveConfig(cfg)
-		log.Printf("Bridge: Matrix Room ID updated: %s", roomId)
-	})
+	// Start Matrix event loop in goroutine
+	go func() {
+		err := mBot.Start(matrixToDcChan, matrixReactChan, func(roomId id.RoomID) {
+			cfg.MatrixRoom = roomId
+			saveConfig(cfg)
+			log.Printf("Bridge: Matrix Room ID updated: %s", roomId)
+		})
+		if err != nil {
+			log.Fatalf("Matrix bot loop failed: %v", err)
+		}
+	}()
 
-	dBot.Start(dcToMatrixChan, dcReactChan, func(chatId uint32) {
-		cfg.DCChatID = chatId
-		saveConfig(cfg)
-		log.Printf("Bridge: Delta Chat ID updated: %d", chatId)
-	})
+	// Start Delta Chat event loop in goroutine
+	go func() {
+		dBot.Start(dcToMatrixChan, dcReactChan, func(chatId uint32) {
+			cfg.DCChatID = chatId
+			saveConfig(cfg)
+			log.Printf("Bridge: Delta Chat ID updated: %d", chatId)
+		})
+	}()
 
+	time.Sleep(2 * time.Second)
 	log.Println("Bridge: Running.")
 
 	c := make(chan os.Signal, 1)
