@@ -458,11 +458,11 @@ func (b *MatrixBot) SendMessageWithReply(text string, replyTo id.EventID) id.Eve
 	return resp.EventID
 }
 
-func (b *MatrixBot) SendMedia(text string, filePath string, msgType event.MessageType, mimeType string) id.EventID {
-	return b.SendMediaWithReply(text, filePath, msgType, mimeType, "")
+func (b *MatrixBot) SendMedia(text string, filePath string, msgType event.MessageType) id.EventID {
+	return b.SendMediaWithReply(text, filePath, msgType, "")
 }
 
-func (b *MatrixBot) SendMediaWithReply(text string, filePath string, msgType event.MessageType, mimeType string, replyTo id.EventID) id.EventID {
+func (b *MatrixBot) SendMediaWithReply(text string, filePath string, msgType event.MessageType, replyTo id.EventID) id.EventID {
 	if b.bridgedRoom == "" {
 		return ""
 	}
@@ -482,14 +482,11 @@ func (b *MatrixBot) SendMediaWithReply(text string, filePath string, msgType eve
 	}
 
 	// Robust MIME type detection
-	mime := mimeType
-	if mime == "" {
-		mime = http.DetectContentType(data[:min(512, len(data))])
-	}
+	mime := http.DetectContentType(data[:min(512, len(data))])
 	ext := strings.ToLower(filepath.Ext(filePath))
 	
 	// Force correct MIME type for common extensions if detection failed or is generic
-	if mime == "" || mime == "application/octet-stream" || strings.HasPrefix(mime, "text/") {
+	if mime == "application/octet-stream" || strings.HasPrefix(mime, "text/") {
 		switch ext {
 		case ".jpg", ".jpeg": mime = "image/jpeg"
 		case ".png": mime = "image/png"
@@ -501,7 +498,6 @@ func (b *MatrixBot) SendMediaWithReply(text string, filePath string, msgType eve
 		case ".ogg": mime = "audio/ogg"
 		case ".wav": mime = "audio/wav"
 		case ".m4a": mime = "audio/mp4"
-		case ".aac": mime = "audio/m4a"
 		}
 	}
 
@@ -511,8 +507,6 @@ func (b *MatrixBot) SendMediaWithReply(text string, filePath string, msgType eve
 		if cfg, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
 			width = cfg.Width
 			height = cfg.Height
-		} else {
-			log.Printf("Matrix: Error decoding image config for %s: %v", filePath, err)
 		}
 		finalMsgType = event.MsgImage
 	} else if finalMsgType == event.MsgVideo || strings.HasPrefix(mime, "video/") {
@@ -522,14 +516,8 @@ func (b *MatrixBot) SendMediaWithReply(text string, filePath string, msgType eve
 	}
 
 	body := text
-	if body == "" || body == "[matrix]" || body == "[deltachat]" {
+	if body == "" || body == "[matrix]" || body == "[deltachat]" || body == "[matrix]: " || body == "[deltachat]: " {
 		body = filepath.Base(filePath)
-	}
-	
-	// Element PC sometimes refuses to render inline images if the body doesn't look like a file.
-	// Ensure body has an extension.
-	if !strings.HasSuffix(strings.ToLower(body), ext) && ext != "" && ext != ".bin" {
-		body = body + " " + filepath.Base(filePath)
 	}
 
 	content := &event.MessageEventContent{

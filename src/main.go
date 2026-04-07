@@ -20,60 +20,39 @@ import (
 )
 
 type Config struct {
-	MatrixRoom     id.RoomID   `json:"matrix_room"`
+	MatrixRoom     id.RoomID `json:"matrix_room"`
+	DCChatID       uint32    `json:"dc_chat_id"`
 	MatrixDeviceID id.DeviceID `json:"matrix_device_id"`
-	DCChatID       uint32      `json:"dc_chat_id"`
 }
 
-const configPath = "/data/bridge_config.json"
-const mappingDBPath = "/data/bridge_mapping.db"
-
-func loadConfig() Config {
-	var cfg Config
-	file, err := os.Open(configPath)
-	if err == nil {
-		json.NewDecoder(file).Decode(&cfg)
-		file.Close()
-	}
-	return cfg
-}
-
-func saveConfig(cfg Config) {
-	file, err := os.Create(configPath)
-	if err == nil {
-		json.NewEncoder(file).Encode(cfg)
-		file.Close()
-	}
-}
-
-var mappingDB *sql.DB
+var (
+	mappingDB *sql.DB
+	lastMessages = make(map[string]time.Time)
+	cacheMutex   sync.Mutex
+)
 
 func initMappingDB() {
 	var err error
-	mappingDB, err = sql.Open("sqlite3", mappingDBPath)
+	mappingDB, err = sql.Open("sqlite3", "/data/bridge_mapping.db")
 	if err != nil {
-		log.Fatalf("Failed to open mapping DB: %v", err)
+		log.Fatal(err)
 	}
-	_, err = mappingDB.Exec(`CREATE TABLE IF NOT EXISTS msg_mapping (
-		matrix_id TEXT PRIMARY KEY,
-		dc_id INTEGER
-	)`)
+	_, err = mappingDB.Exec("CREATE TABLE IF NOT EXISTS mapping (matrix_id TEXT PRIMARY KEY, dc_id INTEGER)")
 	if err != nil {
-		log.Fatalf("Failed to create mapping table: %v", err)
+		log.Fatal(err)
 	}
-	_, err = mappingDB.Exec(`CREATE INDEX IF NOT EXISTS idx_dc_id ON msg_mapping(dc_id)`)
 }
 
 func storeMapping(matrixID id.EventID, dcID uint32) {
-	if matrixID == "" || dcID == 0 {
-		return
+	_, err := mappingDB.Exec("INSERT OR REPLACE INTO mapping (matrix_id, dc_id) VALUES (?, ?)", string(matrixID), dcID)
+	if err != nil {
+		log.Printf("Bridge: Error storing mapping: %v", err)
 	}
-	mappingDB.Exec("INSERT OR REPLACE INTO msg_mapping (matrix_id, dc_id) VALUES (?, ?)", string(matrixID), dcID)
 }
 
 func getDCID(matrixID id.EventID) uint32 {
 	var dcID uint32
-	err := mappingDB.QueryRow("SELECT dc_id FROM msg_mapping WHERE matrix_id = ?", string(matrixID)).Scan(&dcID)
+	err := mappingDB.QueryRow("SELECT dc_id FROM mapping WHERE matrix_id = ?", string(matrixID)).Scan(&dcID)
 	if err != nil {
 		return 0
 	}
@@ -82,19 +61,29 @@ func getDCID(matrixID id.EventID) uint32 {
 
 func getMatrixID(dcID uint32) id.EventID {
 	var matrixID string
-	err := mappingDB.QueryRow("SELECT matrix_id FROM msg_mapping WHERE dc_id = ?", dcID).Scan(&matrixID)
+	err := mappingDB.QueryRow("SELECT matrix_id FROM mapping WHERE dc_id = ?", dcID).Scan(&matrixID)
 	if err != nil {
 		return ""
 	}
 	return id.EventID(matrixID)
 }
 
-// Thread-safe deduplication cache
-var (
-	lastMessages = make(map[string]time.Time)
-	cacheMutex   sync.Mutex
-)
+func loadConfig() Config {
+	file, err := os.ReadFile("/data/bridge_config.json")
+	if err != nil {
+		return Config{}
+	}
+	var cfg Config
+	json.Unmarshal(file, &cfg)
+	return cfg
+}
 
+func saveConfig(cfg Config) {
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	os.WriteFile("/data/bridge_config.json", data, 0644)
+}
+
+// deduplication helper
 func isDuplicate(key string) bool {
 	cacheMutex.Lock()
 	defer cacheMutex.Unlock()
@@ -118,11 +107,8 @@ func isDuplicate(key string) bool {
 	return false
 }
 
-func stripMatrixUser(mxid string) string {
-	if len(mxid) == 0 {
-		return mxid
-	}
-	user := strings.TrimPrefix(mxid, "@")
+func stripMatrixUser(mxid id.UserID) string {
+	user := strings.TrimPrefix(string(mxid), "@")
 	parts := strings.Split(user, ":")
 	return parts[0]
 }
@@ -160,6 +146,7 @@ func main() {
 
 	// --- Initialization loop with smart recovery ---
 	var mBot *MatrixBot
+	backoff := 60
 	for {
 		log.Println("Bridge: Initializing Matrix bot...")
 		mBot, err = NewMatrixBot(matrixHS, matrixAdmin, matrixBotName, matrixUser, matrixPass, cfg.MatrixDeviceID)
@@ -172,8 +159,11 @@ func main() {
 			}
 			
 			if strings.Contains(err.Error(), "429") {
-				log.Println("Bridge: Too many requests. Waiting 60s...")
-				time.Sleep(60 * time.Second)
+				log.Printf("Bridge: Too many requests. Waiting %ds...", backoff)
+				time.Sleep(time.Duration(backoff) * time.Second)
+				if backoff < 300 {
+					backoff += 60 // Linear increase up to 5 mins
+				}
 				continue
 			}
 
@@ -231,7 +221,7 @@ func main() {
 				continue
 			}
 			
-			cleanUser := stripMatrixUser(msg.Sender)
+			cleanUser := stripMatrixUser(id.UserID(msg.Sender))
 			formatted := fmt.Sprintf("[matrix] %s", cleanUser)
 			if msg.Body != "" {
 				formatted = fmt.Sprintf("[matrix] %s: %s", cleanUser, msg.Body)
@@ -322,15 +312,13 @@ func main() {
 					mType = event.MsgFile
 				}
 				formatted := fmt.Sprintf("[deltachat] %s", msg.SenderName)
-				// If the body is just a generic DC placeholder, don't include it in the Matrix caption to avoid dual-captions
-				if msg.Body != "" && !strings.HasPrefix(msg.Body, "[Image ") && !strings.HasPrefix(msg.Body, "[Video ") && !strings.HasPrefix(msg.Body, "[File ") {
+				if msg.Body != "" {
 					formatted = fmt.Sprintf("[deltachat] %s: %s", msg.SenderName, msg.Body)
 				}
-				
 				if replyToMatrix != "" {
-					mEventID = mBot.SendMediaWithReply(formatted, msg.File.Name(), mType, msg.FileMime, replyToMatrix)
+					mEventID = mBot.SendMediaWithReply(formatted, msg.File.Name(), mType, replyToMatrix)
 				} else {
-					mEventID = mBot.SendMedia(formatted, msg.File.Name(), mType, msg.FileMime)
+					mEventID = mBot.SendMedia(formatted, msg.File.Name(), mType)
 				}
 				msg.File.Close()
 				os.Remove(msg.File.Name())
@@ -352,12 +340,8 @@ func main() {
 	go func() {
 		for react := range dcReactChan {
 			mEventID := getMatrixID(react.RelatesTo)
-
 			if mEventID != "" {
 				emojis := strings.Fields(react.Emoji)
-				if len(emojis) == 0 && react.Emoji != "" {
-					emojis = []string{react.Emoji} // ensure single emojis aren't trimmed away incorrectly by Fields
-				}
 				for _, emoji := range emojis {
 					mBot.React(mEventID, emoji)
 				}
@@ -365,19 +349,13 @@ func main() {
 		}
 	}()
 
-	// Matrix -> Delta Chat Reactions  (we missed putting these logs earlier, let's also update the matrix react loop if it exists... Wait, where is the matrixReactChan handled? It's handled earlier!)
-	go func() {
-		err := mBot.Start(matrixToDcChan, matrixReactChan, func(roomId id.RoomID) {
-			cfg.MatrixRoom = roomId
-			saveConfig(cfg)
-			log.Printf("Bridge: Matrix room updated: %s", roomId)
-		})
-		if err != nil {
-			log.Fatalf("Matrix bot crashed: %v", err)
-		}
-	}()
+	mBot.Start(matrixToDcChan, matrixReactChan, func(roomId id.RoomID) {
+		cfg.MatrixRoom = roomId
+		saveConfig(cfg)
+		log.Printf("Bridge: Matrix Room ID updated: %s", roomId)
+	})
 
-	go dBot.Start(dcToMatrixChan, dcReactChan, func(chatId uint32) {
+	dBot.Start(dcToMatrixChan, dcReactChan, func(chatId uint32) {
 		cfg.DCChatID = chatId
 		saveConfig(cfg)
 		log.Printf("Bridge: Delta Chat ID updated: %d", chatId)

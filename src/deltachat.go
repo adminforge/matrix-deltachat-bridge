@@ -93,6 +93,52 @@ func isAdminDC(addr string, admins []string) bool {
 	return false
 }
 
+func isMediaViewType(vt deltachat.Viewtype) bool {
+	switch vt {
+	case deltachat.ViewtypeImage, deltachat.ViewtypeGif, deltachat.ViewtypeVideo,
+		deltachat.ViewtypeAudio, deltachat.ViewtypeVoice, deltachat.ViewtypeFile,
+		deltachat.ViewtypeSticker:
+		return true
+	}
+	return false
+}
+
+func mimeToExt(mime string) string {
+	if mime == "" {
+		return ".bin"
+	}
+	switch strings.ToLower(mime) {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "image/bmp":
+		return ".bmp"
+	case "image/tiff":
+		return ".tiff"
+	case "video/mp4":
+		return ".mp4"
+	case "video/webm":
+		return ".webm"
+	case "audio/mpeg", "audio/mp3":
+		return ".mp3"
+	case "audio/ogg":
+		return ".ogg"
+	case "audio/wav":
+		return ".wav"
+	case "audio/mp4", "audio/m4a":
+		return ".m4a"
+	case "audio/aac":
+		return ".aac"
+	default:
+		return ".bin"
+	}
+}
+
 func NewDeltaChatBot(dbPath, adminList, botName string) (*DeltaChatBot, error) {
 	trans := deltachat.NewIOTransport()
 	if err := trans.Open(); err != nil {
@@ -119,11 +165,7 @@ func NewDeltaChatBot(dbPath, adminList, botName string) (*DeltaChatBot, error) {
 	var email string
 
 	if len(accIds) == 0 {
-		if strings.ToLower(os.Getenv("DELTACHAT_ALLOW_NEW_ACCOUNT")) != "true" {
-			return nil, fmt.Errorf("no existing Delta Chat account found and DELTACHAT_ALLOW_NEW_ACCOUNT is not set to true. Aborting to prevent accidental new registration")
-		}
-
-		log.Printf("DeltaChat: No account found and DELTACHAT_ALLOW_NEW_ACCOUNT is true. Requesting new email from chat.adminforge.de...")
+		log.Printf("DeltaChat: No account found. Requesting new email from chat.adminforge.de...")
 		resp, err := http.Get("https://chat.adminforge.de/new_email")
 		if err != nil {
 			return nil, fmt.Errorf("failed to request new email: %w", err)
@@ -180,7 +222,7 @@ func NewDeltaChatBot(dbPath, adminList, botName string) (*DeltaChatBot, error) {
 		log.Printf("DeltaChat: Using existing account %d (%s)", accId, email)
 
 		// Re-enforce stable ports even for existing accounts
-		mailServer := "ssl://chat.adminforge.de"
+		mailServer := "chat.adminforge.de"
 		mailPort := "993"
 		smtpPort := "465"
 		secVal := "2" // SSL/TLS (Implicit)
