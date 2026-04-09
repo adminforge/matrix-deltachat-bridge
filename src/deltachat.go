@@ -384,6 +384,10 @@ func (b *DeltaChatBot) Start(msgChan chan<- DeltaChatMessage, reactChan chan<- D
 		contact, err := bot.Rpc.GetContact(accId, ev.ContactId)
 		senderName := "Unknown"
 		if err == nil {
+			// Ignore reactions made by the bridge bot itself
+			if contact.Address == b.email {
+				return
+			}
 			senderName = contact.DisplayName
 			if senderName == "" {
 				senderName = contact.Address
